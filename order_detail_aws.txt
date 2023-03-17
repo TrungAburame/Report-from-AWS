@@ -1,0 +1,251 @@
+import sys, os, base64, datetime, hashlib, hmac, json, requests
+import pandas as pd
+
+import sys
+sys.path.insert(0, 'D:\y4a_project')
+
+from time import sleep
+
+# query and Connection  is a function to insert data into Oracle, since there are lots of password, I will not attach that file into this project
+from Support_Tool import query as query
+from Connection import Connect_y4a_int as biicnnt
+
+
+# these details is censored
+def country_info(region):
+    array_info ={'USA': {'aws_access_key': 'AKIAxxxxxxxxxxxxxxxxxx',
+             'aws_secret_key': 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+             'lwa_app_id': 'amzn1.application-oa2-client.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+             'lwa_client_secret': 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+             'marketplaceid': 'ATVPDKIKX0DER',
+             'refresh_token': 'Atzr|xxxxxxxxxxxxxxxxxxxxxxx',
+             'country_code': 'US'},
+     }
+    return array_info[region]
+
+def get_Order_response(from_date, to_date,country, next_token):
+    url = f"http://ads-services-api.yes4all.internal:6668/amz_avc_y4a/orders/v0/orders?MarketplaceIds=A2VIGQ35RCS4UG&CreatedAfter={from_date}&CreateBefore={to_date}"
+    headers = {
+    'Y4A-Token': 'xxxxxxxxxxxxxx',
+    'Y4A-SP-Country': f'{country}',
+    'Y4A-SP-API-Type': 'xxxx',
+    'Y4A-Account': 'xxxxx',
+    'Connection': '',
+    'NextToken': f'{next_token}'
+    }
+    payload={}
+
+
+    while True:
+        try:
+            response = requests.request("GET", url, headers=headers, data=payload)
+            break
+        except Exception as e:
+            print(e)
+                
+
+    response_json = json.loads(response.text)
+    orders = response_json['data']['payload']['Orders']
+    try:
+        next_token = response_json['data']['payload']['NextToken']
+    except:
+        next_token = None
+    return orders, next_token
+
+# input a list of api response, return the processed dataframe
+def clean_Order_reponse(all_response):
+  df = pd.DataFrame.from_dict(pd.json_normalize(all_response), orient='columns')
+
+  needed_columns = ['AmazonOrderId','EarliestDeliveryDate','EarliestShipDate','SalesChannel','OrderStatus','NumberOfItemsShipped','OrderType','IsPremiumOrder','IsPrime',
+                    'FulfillmentChannel','NumberOfItemsUnshipped','HasRegulatedItems','IsReplacementOrder','IsSoldByAB','LatestShipDate','ShipServiceLevel','IsISPU','MarketplaceId',
+                    'LatestDeliveryDate','PurchaseDate','IsAccessPointOrder','PaymentMethod','IsBusinessOrder','PaymentMethodDetails','IsGlobalExpressEnabled','LastUpdateDate',
+                    'ShipmentServiceLevelCategory','BuyerInfo.BuyerEmail','AutomatedShippingSettings.HasAutomatedShippingSettings', 'AutomatedShippingSettings.AutomatedShipMethodName', 
+                    'AutomatedShippingSettings.AutomatedCarrierName','DefaultShipFromLocationAddress.AddressLine2',
+                    'DefaultShipFromLocationAddress.StateOrRegion','DefaultShipFromLocationAddress.AddressLine1','DefaultShipFromLocationAddress.PostalCode',
+                    'DefaultShipFromLocationAddress.City','DefaultShipFromLocationAddress.CountryCode','DefaultShipFromLocationAddress.Name','ShippingAddress.StateOrRegion',
+                    'ShippingAddress.PostalCode','ShippingAddress.City','ShippingAddress.CountryCode','OrderTotal.CurrencyCode','OrderTotal.Amount','SellerOrderId']
+  
+  empty_df = pd.DataFrame(columns = needed_columns)
+  df =pd.concat([empty_df, df], axis = 0)
+  df = df[needed_columns]
+
+  new_col =['AMAZON_ORDER_ID','EARLIEST_DELIVERY_DATE','EARLIEST_SHIP_DATE','SALES_CHANNEL','ORDER_STATUS','NUMBER_OF_ITEMS_SHIPPED','ORDER_TYPE','IS_PREMIUM_ORDER','IS_PRIME',
+            'FULFILLMENT_CHANNEL','NUMBER_OF_ITEMS_UNSHIPPED','HAS_REGULATED_ITEM','IS_REPLACEMENT_ORDER','IS_SOLD_BY_AB','LATEST_SHIP_DATE','SHIP_SERVICE_LEVEL','IS_ISPU','MARKET_PLACE_ID',
+            'LATEST_DELIVERY_DATE','PURCHASE_DATE','IS_ACCESS_POINT_ORDER','PAYMENT_METHOD','IS_BUSINESS_ORDER','PAYMENT_METHOD_DETAIL','IS_GLOBAL_EXPRESS_ENABLED','LAST_UPDATE_DATE',
+            'SHIPMENT_SERVICE_LEVEL_CATEGORY','BUYER_EMAIL','HAS_AUTOMATED_SHIPPING_SETTINGS', 'AUTOMATED_SHIP_METHOD_NAME','AUTOMATED_CARRIER_NAME','DEFAULF_SHIP_FROM_LOCATION_ADDRESSLINE2',
+            'DEFAULF_SHIP_FROM_LOCATION_STATE_OR_REGION','DEFAULF_SHIP_FROM_LOCATION_ADDRESSLINE1','DEFAULF_SHIP_FROM_LOCATION_POSTAL_CODE',
+            'DEFAULF_SHIP_FROM_LOCATION_CITY','DEFAULF_SHIP_FROM_LOCATION_COUNTRY_CODE','DEFAULF_SHIP_FROM_LOCATION_NAME','SHIPPING_ADDRESS_STATE_OR_REGION',
+            'SHIPPING_ADDRESS_POSTAL_CODE','SHIPPING_ADDRESS_CITY','SHIPPING_ADDRESS_COUNTRY_CODE','ORDER_TOTAL_CURRENCY_CODE','ORDER_TOTAL_AMOUNT','SELLER_ORDER_ID']
+  df.columns = new_col
+  df = df.replace('null', None)
+  
+  return df
+
+# final function, fetch all orders in a country and insert to the table
+def get_Order(country, from_date, to_date):
+    country_code = country_info(country)['country_code']
+
+    create_date_str = from_date.strftime('%Y-%m-%dT%H:%M:%SZ').replace(':','%3A')
+    to_date_str = to_date.strftime('%Y-%m-%dT%H:%M:%SZ').replace(':','%3A')
+
+    next_token = None
+    api_response, next_token = get_Order_response(create_date_str, to_date_str, country, next_token)
+    if len(api_response) > 1:
+        final_df = clean_Order_reponse(api_response)
+
+        # run date is necessary for tracking newest data
+        final_df['RUN_DATE'] = datetime.datetime.now()
+        final_df['COUNTRY_CODE'] = country_code
+
+        list_update_id = list(final_df['AMAZON_ORDER_ID'])
+        
+        # old data should be deleted before inserting updated data
+        if len(list_update_id) > 0:
+            try:
+                tuple_delete = tuple(list_update_id)
+                delete_sql = f"delete from Y4A_INT.AMZ_SEL_ORD_SUM_ADH_V4 where AMAZON_ORDER_ID in {tuple_delete}".replace(",)",")")
+
+                # query is a function to insert data into Oracle, since there are lots of password, I will not attach that file into this project
+                query.run_sql(biicnnt,delete_sql)
+                query.df_to_oratable_2(biicnnt, final_df, [], 'Y4A_INT', 'AMZ_SEL_ORD_SUM_ADH_V4', True)
+            
+            except Exception as e:
+                print(e)
+                pass
+
+    while next_token is not None:
+        api_response, next_token = get_Order_response(create_date_str, to_date_str, country, next_token)
+        if len(api_response) > 1:
+            final_df = clean_Order_reponse(api_response)
+            final_df['RUN_DATE'] = datetime.datetime.now()
+            final_df['COUNTRY_CODE'] = country_code
+
+            list_update_id = list(final_df['AMAZON_ORDER_ID'])
+                        
+            if len(list_update_id) > 0:
+                try:
+                    tuple_delete = tuple(list_update_id)
+                    delete_sql = f"delete from Y4A_INT.AMZ_SEL_ORD_SUM_ADH_V4 where AMAZON_ORDER_ID in {tuple_delete}".replace(",)",")")
+                    query.run_sql(biicnnt,delete_sql)
+                    query.df_to_oratable_2(biicnnt, final_df, [], 'Y4A_INT', 'AMZ_SEL_ORD_SUM_ADH_V4', True)
+                except Exception as e:
+                    print(e)
+                    pass
+                
+def get_Items_response(id):
+    url = f"http://ads-services-api.yes4all.internal:6668/amz_avc_y4a/orders/v0/orders/{id}/orderItems?orderId={id}"
+    next_token = None
+    all_response = []
+
+    headers = {
+        'Y4A-Token': 'xxxxxxxxxxxxx',
+        'Y4A-SP-Country': 'xxxxx',
+        'Y4A-SP-API-Type': 'xxxxx',
+        'Y4A-Account': 'xxxxxx',
+        'Amazon-Advertising-API-Scope': 'xxxxxxx',
+        'Connection': '',
+        'NextToken': f'{next_token}'
+    }
+    payload={}
+
+
+    while True:
+        try:
+            response = requests.request("GET", url, headers=headers, data=payload)
+            response_json = json.loads(response.text)
+            all_response = all_response + response_json['data']['payload']['OrderItems']
+
+            try:
+                next_token = response_json['data']['payload']['NextToken']
+            except:
+                next_token = None
+            break
+        except Exception as e:
+            print(e)
+                
+    while next_token is not None:
+        try:
+            response = requests.request("GET", url, headers=headers, data=payload)
+            response_json = json.loads(response.text)
+            all_response = all_response + response_json['data']['payload']['OrderItems']
+
+            try:
+                next_token = response_json['data']['payload']['NextToken']
+            except:
+                next_token = None
+            break
+        except Exception as e:
+            print(e)
+    
+    
+    return all_response
+
+# input a list of api response, return the processed dataframe
+def clean_Items_response(all_response):
+  df = pd.DataFrame.from_dict(pd.json_normalize(all_response), orient='columns')
+
+  needed_columns = ['amazon_order_id','ASIN','SellerSKU','OrderItemId','Title','QuantityOrdered','QuantityShipped','ProductInfo.NumberOfItems','ItemPrice.CurrencyCode','ItemPrice.Amount',
+          'ItemTax.CurrencyCode','ItemTax.Amount','PromotionDiscount.CurrencyCode','PromotionDiscount.Amount','PromotionDiscountTax.CurrencyCode','PromotionDiscountTax.Amount',
+          'PromotionIds','IsGift','ConditionNote','ConditionId','ConditionSubtypeId','IsTransparency']
+  
+  empty_df = pd.DataFrame(columns = needed_columns)
+  df =pd.concat([empty_df, df], axis = 0)
+  df = df[needed_columns]
+
+  new_col =['AMAZON_ORDER_ID','ASIN','SELLERSKU','ORDER_ITEM_ID','TITLE','QUANTITY_ORDERED','QUANTITY_SHIPPED','PRODUCT_INFO_NUMBER_OF_ITEMS','ITEM_PRICE_CURRENCY_CODE','ITEM_PRICE_AMOUNT',
+            'ITEM_TAX_CURRENCY_CODE','ITEM_TAX_AMOUNT','PROMOTION_DISCOUNT_CURRENCY_CODE','PROMOTION_DISCOUNT_AMOUNT','PROMOTION_DISCOUNT_TAX_CURRENCY_CODE','PROMOTION_DISCOUNT_TAX_AMOUNT',
+            'PROMOTIONID','ISGIFT','CONDITIONNOTE','CONDITIONID','CONDITION_SUBTYPE_ID','ISTRANSPARENCY']
+  df.columns = new_col
+  df = df.replace('null', None)
+  return df
+
+# final function, fetch all orders in a country and insert to the table
+def get_order_items(country, from_date, to_date):
+    region_if = country_info(country)
+    country_code = region_if['country_code']
+    marketplace_id = region_if['marketplaceid']
+
+    data_date_str = from_date.strftime('%Y-%m-%d %H:%M:%S')
+    to_date_str = to_date.strftime('%Y-%m-%d %H:%M:%S')
+
+    lst_order = query.query(biicnnt, f"""select distinct(AMAZON_ORDER_ID) ID from Y4A_INT.AMZ_SEL_ORD_SUM_ADH_V4 
+    where PURCHASE_DATE >= TO_DATE('{data_date_str}','YYYY-MM-DD HH24:MI:SS') 
+    and PURCHASE_DATE <= TO_DATE('{to_date_str}','YYYY-MM-DD HH24:MI:SS') 
+    and country_code = '{country_code}'""")
+    ids = list(lst_order['ID'])
+    print(len(ids))
+    for id in ids:
+        try:
+            all_response_today = get_Items_response(id)
+            
+            final_df = clean_Items_response(all_response_today)
+            final_df['RUN_DATE'] = datetime.datetime.now()
+            final_df['MARKETPLACE_ID'] = marketplace_id
+            final_df['AMAZON_ORDER_ID'] = id
+
+            # tuple_delete = tuple(ids)
+            delete_sql = f"delete from Y4A_INT.AMZ_SEL_ORD_DTL_ADH_V2 where AMAZON_ORDER_ID = '{id}'".replace(",)",")")
+
+            query.run_sql(biicnnt,delete_sql)
+            query.df_to_oratable_2(biicnnt, final_df, [], 'Y4A_INT', 'AMZ_SEL_ORD_DTL_ADH_V2', True)
+
+        except  Exception as e:
+            print(e)
+            pass
+        
+
+consider_time = datetime.datetime.now()
+consider_weeknum = consider_time.strftime('%A')
+full_scan_weekday = 'Saturday'
+
+if consider_weeknum == full_scan_weekday:
+  date_range = 30
+else:
+  date_range = 7
+# date_range = 74
+from_date = datetime.datetime.now() - datetime.timedelta(days = date_range)
+to_date = datetime.datetime.now() - datetime.timedelta(days = 1)
+country = 'USA'
+
+get_Order(country, from_date, to_date)
+get_order_items(country, from_date, to_date)
