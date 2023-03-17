@@ -1,0 +1,56 @@
+import pygsheets
+import psycopg2, time
+import pandas as pd
+import datetime
+
+import sys
+sys.path.insert(0, 'D:\y4a_project')
+from Support_Tool import query as query
+from Connection import Connect_y4a_int as biicnnt
+
+
+
+ora_query = '''SELECT 
+	purchase_year, 
+	purchase_month, 
+	purchase_date, 
+	COUNTRY_CODE, 
+	count(AMAZON_ORDER_ID) AS check_dup, 
+	count(DISTINCT(AMAZON_ORDER_ID)) AS total_orders,
+	sum(ORDER_TOTAL_AMOUNT) AS order_amount
+FROM 
+(
+SELECT 	to_char(PURCHASE_DATE,'YYYY') AS purchase_year, 
+		to_char(PURCHASE_DATE,'MM-YYYY') AS purchase_month, 
+		to_char(PURCHASE_DATE,'YYYY-MM-DD') AS purchase_date, 
+		PURCHASE_DATE AS PURCHASE_DATEE,
+		AMAZON_ORDER_ID,
+		COUNTRY_CODE,
+		ORDER_TOTAL_AMOUNT
+FROM Y4A_INT.AMZ_SEL_ORD_SUM_ADH_V4)
+GROUP BY purchase_year, purchase_month, purchase_date, COUNTRY_CODE
+ORDER BY purchase_date  DESC '''
+
+df = query.query(biicnnt, ora_query)
+
+
+# funcion này để ghi df vào google sheet (copy trên stackoverflow)
+def write_to_gsheet(service_file_path, spreadsheet_id, sheet_name, data_df):
+    gc = pygsheets.authorize(service_file=service_file_path)
+    sh = gc.open_by_key(spreadsheet_id)
+    try:
+        sh.add_worksheet(sheet_name)
+    except:
+        pass
+    wks_write = sh.worksheet_by_title(sheet_name)
+    wks_write.clear('A1',None,'*')
+    wks_write.set_dataframe(data_df, (1,1), encoding='utf-8', fit=True)
+    wks_write.frozen_rows = 1
+
+# thông tin để input vào gg sheet
+sheet_id = 'xxxxx'
+sheet_name = 'raw'
+service_file = r'C:\Users\trungntn\Desktop\Project\hazel-champion-378707-bf9686dabfab.json'
+
+# viết vào ggsheet
+write_to_gsheet(service_file, sheet_id, sheet_name, df)
